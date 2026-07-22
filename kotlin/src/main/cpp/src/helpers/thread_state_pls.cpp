@@ -126,6 +126,30 @@ void PLSThreadState::destroySurface(EGLSurface eglSurface)
         }
     }
 
+    // Drain previously submitted GL work before destroying the surface. Mali
+    // drivers tear down surface-internal sync objects asynchronously, and
+    // destroying while work is still in flight races that teardown (FORTIFY
+    // destroyed-mutex abort / SIGSEGV inside libGLES_mali on the render
+    // worker). Bounded wait: a wedged driver degrades to today's behavior
+    // instead of hanging the worker. Same approach as Flutter's
+    // wait-device-idle-before-destroy (flutter/flutter#187477).
+    const GLsync drainFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (drainFence != nullptr)
+    {
+        constexpr GLuint64 kDrainTimeoutNs = 100000000; // 100ms
+        const GLenum waitResult = glClientWaitSync(drainFence,
+                                                   GL_SYNC_FLUSH_COMMANDS_BIT,
+                                                   kDrainTimeoutNs);
+        if (waitResult == GL_TIMEOUT_EXPIRED || waitResult == GL_WAIT_FAILED)
+        {
+            RiveLogW(TAG,
+                     "GPU drain before surface destroy did not complete "
+                     "(result 0x%X).",
+                     waitResult);
+        }
+        glDeleteSync(drainFence);
+    }
+
     RiveLogD(TAG, "Destroying surface.");
     if (!eglDestroySurface(m_display, eglSurface))
     {
